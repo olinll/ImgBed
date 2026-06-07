@@ -15,8 +15,7 @@ const corsHeaders = {
 };
 
 // D1 单字段限制 2MB，KV 限制 25MB
-const INDEX_CHUNK_SIZE_D1 = 500;
-const INDEX_CHUNK_SIZE_KV = 5000;
+const INDEX_CHUNK_SIZE = 500;
 
 /**
  * 创建 JSON 响应
@@ -39,12 +38,12 @@ export async function onRequestGet(context) {
 
   try {
     const config = checkDatabaseConfig(env);
-    const chunkSize = config.usingD1 ? INDEX_CHUNK_SIZE_D1 : INDEX_CHUNK_SIZE_KV;
+    const chunkSize = INDEX_CHUNK_SIZE;
 
     return jsonResponse({
       success: true,
       chunkSize,
-      databaseType: config.usingD1 ? 'd1' : 'kv',
+      databaseType: 'sqlite',
     });
   } catch (error) {
     return jsonResponse({ success: false, error: error.message }, 500);

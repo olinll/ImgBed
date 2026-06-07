@@ -11,7 +11,6 @@ export async function onRequest(context) {
         return new Response('Method Not Allowed', { status: 405 });
     }
 
-    // 双重鉴权检查
     const url = new URL(request.url);
     const { authorized } = await dualAuthCheck(env, url, request);
     if (!authorized) {
@@ -26,39 +25,20 @@ export async function onRequest(context) {
 
         let uploadConfig;
         if (includeDisabled) {
-            // 获取所有上传配置（包括禁用的渠道）
             const db = getDatabase(env);
             uploadConfig = await getUploadConfig(db, env);
         } else {
-            // 获取上传配置（已过滤禁用的渠道）
             uploadConfig = await fetchUploadConfig(env, context);
         }
 
-        // 构建渠道列表，返回渠道名称和实际的 Channel 类型
         const channels = {
-            telegram: uploadConfig.telegram.channels.map(ch => ({
-                name: ch.name,
-                type: 'TelegramNew'
-            })),
-            cfr2: uploadConfig.cfr2.channels.map(ch => ({
-                name: ch.name,
-                type: 'CloudflareR2'
-            })),
             s3: uploadConfig.s3.channels.map(ch => ({
                 name: ch.name,
                 type: 'S3'
             })),
-            discord: uploadConfig.discord.channels.map(ch => ({
+            local: (uploadConfig.local?.channels || []).map(ch => ({
                 name: ch.name,
-                type: 'Discord'
-            })),
-            huggingface: uploadConfig.huggingface.channels.map(ch => ({
-                name: ch.name,
-                type: 'HuggingFace'
-            })),
-            webdav: uploadConfig.webdav.channels.map(ch => ({
-                name: ch.name,
-                type: 'WebDAV'
+                type: 'Local'
             }))
         };
 

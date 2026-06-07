@@ -1,7 +1,5 @@
 /* ======= 客户端分块上传处理 ======= */
 import { createResponse, selectConsistentChannel, getUploadIp, getIPAddress, buildUniqueFileId, endUpload } from './uploadTools';
-import { TelegramAPI } from '../utils/storage/telegramAPI';
-import { DiscordAPI } from '../utils/storage/discordAPI';
 import { S3Client, CreateMultipartUploadCommand, UploadPartCommand, AbortMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { getDatabase, checkDatabaseConfig } from '../utils/databaseAdapter.js';
 
@@ -32,10 +30,7 @@ export async function initializeChunkedUpload(context) {
         const ipAddress = await getIPAddress(uploadIp);
 
         // 获取上传渠道
-        const uploadChannel = url.searchParams.get('uploadChannel') || 'telegram';
-        if (uploadChannel === 'webdav') {
-            return createResponse('Error: WebDAV channel does not support chunked uploads. Please use non-chunked upload within your Cloudflare request body limit.', { status: 400 });
-        }
+        const uploadChannel = url.searchParams.get('uploadChannel') || 's3';
         // 获取指定的渠道名称
         const channelName = url.searchParams.get('channelName') || '';
 
@@ -123,10 +118,7 @@ export async function handleChunkUpload(context) {
         }
 
         // 获取上传渠道
-        const uploadChannel = url.searchParams.get('uploadChannel') || sessionInfo.uploadChannel || 'telegram';
-        if (uploadChannel === 'webdav') {
-            return createResponse('Error: WebDAV channel does not support chunked uploads. Please use non-chunked upload within your Cloudflare request body limit.', { status: 400 });
-        }
+        const uploadChannel = url.searchParams.get('uploadChannel') || sessionInfo.uploadChannel || 's3';
         // 获取指定的渠道名称
         const channelName = url.searchParams.get('channelName') || sessionInfo.channelName || '';
 
@@ -206,7 +198,7 @@ export async function handleCleanupRequest(context, uploadId, totalChunks) {
     }
 }
 
-/* ======= 单个分块上传到不同渠道的存储端 ======= */
+/* ======= 单个分块上传到S3存储端 ======= */
 
 // 带超时保护的异步上传分块到存储端
 async function uploadChunkToStorageWithTimeout(context, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType, uploadChannel, chunkData) {
@@ -284,17 +276,11 @@ async function uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, 
         }
 
         for (let retry = 0; retry < MAX_RETRIES; retry++) {
-            // 根据渠道上传分块
+            // 上传分块到S3
             let uploadResult = null;
 
-            if (uploadChannel === 'cfr2') {
-                uploadResult = await uploadSingleChunkToR2Multipart(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType);
-            } else if (uploadChannel === 's3') {
+            if (uploadChannel === 's3') {
                 uploadResult = await uploadSingleChunkToS3Multipart(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType);
-            } else if (uploadChannel === 'telegram') {
-                uploadResult = await uploadSingleChunkToTelegram(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType);
-            } else if (uploadChannel === 'discord') {
-                uploadResult = await uploadSingleChunkToDiscord(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType);
             }
 
             if (uploadResult && uploadResult.success) {
@@ -362,94 +348,6 @@ async function uploadChunkToStorage(context, chunkIndex, totalChunks, uploadId, 
     }
 }
 
-// 上传单个分块到R2 (Multipart Upload)
-async function uploadSingleChunkToR2Multipart(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType) {
-    const { env, uploadConfig } = context;
-    const db = getDatabase(env);
-
-    try {
-        const r2Settings = uploadConfig.cfr2;
-        if (!r2Settings.channels || r2Settings.channels.length === 0) {
-            return { success: false, error: 'No R2 channel provided' };
-        }
-
-        const R2DataBase = env.img_r2;
-        const multipartKey = `multipart_${uploadId}`;
-
-        let finalFileId;
-
-        // 如果是第一个分块，生成并保存 finalFileId
-        if (chunkIndex === 0) {
-            finalFileId = await buildUniqueFileId(context, originalFileName, originalFileType);
-
-            const multipartUpload = await R2DataBase.createMultipartUpload(finalFileId);
-            const multipartInfo = {
-                uploadId: multipartUpload.uploadId,
-                key: finalFileId
-            };
-
-            // 保存multipart info
-            await db.put(multipartKey, JSON.stringify(multipartInfo), {
-                expirationTtl: 3600 // 1小时过期
-            });
-        } else {
-            // 其他分块需要等待第一个分块完成multipart upload初始化
-            let multipartInfoData = null;
-            let retryCount = 0;
-            const maxRetries = 30; // 最多等待60秒
-
-            while (!multipartInfoData && retryCount < maxRetries) {
-                multipartInfoData = await db.get(multipartKey);
-                if (!multipartInfoData) {
-                    // 等待2秒后重试
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    retryCount++;
-                    console.log(`R2 chunk ${chunkIndex} waiting for multipart initialization... (${retryCount}/${maxRetries})`);
-                }
-            }
-
-            if (!multipartInfoData) {
-                return { success: false, error: 'Multipart upload not initialized after waiting' };
-            }
-
-            const multipartInfo = JSON.parse(multipartInfoData);
-            finalFileId = multipartInfo.key;
-        }
-
-        // 获取multipart info
-        const multipartInfoData = await db.get(multipartKey);
-        if (!multipartInfoData) {
-            return { success: false, error: 'Multipart upload not initialized' };
-        }
-
-        const multipartInfo = JSON.parse(multipartInfoData);
-
-        // 上传分块
-        const multipartUpload = R2DataBase.resumeMultipartUpload(finalFileId, multipartInfo.uploadId);
-        const uploadedPart = await multipartUpload.uploadPart(chunkIndex + 1, chunkData);
-
-        if (!uploadedPart || !uploadedPart.etag) {
-            throw new Error(`Failed to upload part ${chunkIndex + 1} to R2`);
-        }
-
-        return {
-            success: true,
-            partNumber: chunkIndex + 1,
-            etag: uploadedPart.etag,
-            size: chunkData.byteLength,
-            uploadTime: Date.now(),
-            multipartUploadId: multipartInfo.uploadId,
-            key: finalFileId
-        };
-
-    } catch (error) {
-        return {
-            success: false,
-            error: error.message
-        };
-    }
-}
-
 // 上传单个分块到S3 (Multipart Upload)
 async function uploadSingleChunkToS3Multipart(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType) {
     const { env, uploadConfig, specifiedChannelName } = context;
@@ -458,7 +356,7 @@ async function uploadSingleChunkToS3Multipart(context, chunkData, chunkIndex, to
     try {
         const s3Settings = uploadConfig.s3;
         const s3Channels = s3Settings.channels;
-        
+
         // 优先使用指定的渠道名称
         let s3Channel;
         if (specifiedChannelName) {
@@ -570,177 +468,6 @@ async function uploadSingleChunkToS3Multipart(context, chunkData, chunkIndex, to
             error: error.message
         };
     }
-}
-
-// 上传单个分块到Telegram
-async function uploadSingleChunkToTelegram(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType) {
-    const { uploadConfig, specifiedChannelName } = context;
-
-    try {
-        const tgSettings = uploadConfig.telegram;
-        const tgChannels = tgSettings.channels;
-        
-        // 优先使用指定的渠道名称
-        let tgChannel;
-        if (specifiedChannelName) {
-            tgChannel = tgChannels.find(ch => ch.name === specifiedChannelName);
-        }
-        if (!tgChannel) {
-            tgChannel = selectConsistentChannel(tgChannels, uploadId, tgSettings.loadBalance.enabled);
-        }
-
-        console.log(`Uploading Telegram chunk ${chunkIndex} for uploadId: ${uploadId}, selected channel: ${tgChannel.name || 'default'}`);
-
-        if (!tgChannel) {
-            return { success: false, error: 'No Telegram channel provided' };
-        }
-
-        const tgBotToken = tgChannel.botToken;
-        const tgChatId = tgChannel.chatId;
-        const tgProxyUrl = tgChannel.proxyUrl || '';
-
-        // 创建分块文件名
-        const chunkFileName = `${originalFileName}.part${chunkIndex.toString().padStart(3, '0')}`;
-        const chunkBlob = new Blob([chunkData], { type: 'application/octet-stream' });
-
-        // 上传分块到Telegram（支持代理域名）
-        const chunkInfo = await uploadChunkToTelegramWithRetry(
-            tgBotToken,
-            tgChatId,
-            tgProxyUrl,
-            chunkBlob,
-            chunkFileName,
-            chunkIndex,
-            totalChunks, // 传入正确的totalChunks
-            2 // maxRetries
-        );
-
-        if (!chunkInfo) {
-            return { success: false, error: 'Failed to upload chunk to Telegram' };
-        }
-
-        return {
-            success: true,
-            fileId: chunkInfo.file_id,
-            size: chunkInfo.file_size,
-            fileName: chunkFileName,
-            uploadTime: Date.now(),
-            tgChannel: tgChannel.name
-        };
-
-    } catch (error) {
-        return {
-            success: false,
-            error: error.message
-        };
-    }
-}
-
-// 上传单个分块到Discord
-async function uploadSingleChunkToDiscord(context, chunkData, chunkIndex, totalChunks, uploadId, originalFileName, originalFileType) {
-    const { uploadConfig, specifiedChannelName } = context;
-
-    try {
-        const discordSettings = uploadConfig.discord;
-        const discordChannels = discordSettings.channels;
-        
-        // 优先使用指定的渠道名称
-        let discordChannel;
-        if (specifiedChannelName) {
-            discordChannel = discordChannels.find(ch => ch.name === specifiedChannelName);
-        }
-        if (!discordChannel) {
-            discordChannel = selectConsistentChannel(discordChannels, uploadId, discordSettings.loadBalance?.enabled);
-        }
-
-        console.log(`Uploading Discord chunk ${chunkIndex} for uploadId: ${uploadId}, selected channel: ${discordChannel.name || 'default'}`);
-
-        if (!discordChannel) {
-            return { success: false, error: 'No Discord channel provided' };
-        }
-
-        const botToken = discordChannel.botToken;
-        const channelId = discordChannel.channelId;
-
-        // 创建分块文件名
-        const chunkFileName = `${originalFileName}.part${chunkIndex.toString().padStart(3, '0')}`;
-        const chunkBlob = new Blob([chunkData], { type: 'application/octet-stream' });
-
-        // 上传分块到Discord（带重试）
-        const chunkInfo = await uploadChunkToDiscordWithRetry(
-            botToken,
-            channelId,
-            chunkBlob,
-            chunkFileName,
-            chunkIndex,
-            totalChunks,
-            2 // maxRetries
-        );
-
-        if (!chunkInfo) {
-            return { success: false, error: 'Failed to upload chunk to Discord' };
-        }
-
-        return {
-            success: true,
-            messageId: chunkInfo.message_id,
-            // 注意：不存储 attachmentId 和 url，因为它们会在约24小时后过期
-            // 读取时会通过 messageId 获取新的 URL
-            size: chunkInfo.file_size,
-            fileName: chunkFileName,
-            uploadTime: Date.now(),
-            discordChannel: discordChannel.name
-        };
-
-    } catch (error) {
-        return {
-            success: false,
-            error: error.message
-        };
-    }
-}
-
-// 将每个分块上传至Discord，支持失败重试和 rate limit 处理
-async function uploadChunkToDiscordWithRetry(botToken, channelId, chunkBlob, chunkFileName, chunkIndex, totalChunks, maxRetries = 2) {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-            const discordAPI = new DiscordAPI(botToken);
-
-            const response = await discordAPI.sendFile(chunkBlob, channelId, chunkFileName);
-
-            if (!response || !response.id) {
-                throw new Error('Invalid Discord response');
-            }
-
-            const fileInfo = discordAPI.getFileInfo(response);
-            if (!fileInfo) {
-                throw new Error('Failed to extract file info from response');
-            }
-
-            return fileInfo;
-
-        } catch (error) {
-            console.warn(`Discord chunk ${chunkIndex} upload attempt ${attempt + 1} failed:`, error.message);
-
-            // 检查是否是 rate limit (429)
-            if (error.message && error.message.includes('429')) {
-                // 从错误消息中提取 retry_after，或使用默认值
-                const retryAfter = 5000; // 默认等待 5 秒
-                console.log(`Discord rate limited, waiting ${retryAfter}ms...`);
-                await new Promise(resolve => setTimeout(resolve, retryAfter));
-                continue; // 不计入重试次数
-            }
-
-            if (attempt === maxRetries - 1) {
-                return null; // 最后一次尝试也失败了
-            }
-
-            // 指数退避延迟
-            await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-        }
-    }
-
-    return null;
 }
 
 /* ======== 分块合并时与上传相关的工具函数 ======= */
@@ -875,16 +602,10 @@ async function retrySingleChunk(context, chunk, uploadChannel, maxRetries = 5, r
         });
 
         while (retryCount < maxRetries) {
-            // 根据渠道重新上传，添加超时保护
+            // 重新上传到S3，添加超时保护
             const retryPromise = (async () => {
-                if (uploadChannel === 'cfr2') {
-                    return await uploadSingleChunkToR2Multipart(context, chunkData, chunk.index, totalChunks, uploadId, originalFileName, originalFileType);
-                } else if (uploadChannel === 's3') {
+                if (uploadChannel === 's3') {
                     return await uploadSingleChunkToS3Multipart(context, chunkData, chunk.index, totalChunks, uploadId, originalFileName, originalFileType);
-                } else if (uploadChannel === 'telegram') {
-                    return await uploadSingleChunkToTelegram(context, chunkData, chunk.index, totalChunks, uploadId, originalFileName, originalFileType);
-                } else if (uploadChannel === 'discord') {
-                    return await uploadSingleChunkToDiscord(context, chunkData, chunk.index, totalChunks, uploadId, originalFileName, originalFileType);
                 }
                 return null;
             })();
@@ -976,17 +697,11 @@ export async function cleanupFailedMultipartUploads(context, uploadId, uploadCha
 
         const multipartInfo = JSON.parse(multipartInfoData);
 
-        if (uploadChannel === 'cfr2') {
-            // 清理R2 multipart upload
-            const R2DataBase = env.img_r2;
-            const multipartUpload = R2DataBase.resumeMultipartUpload(multipartInfo.key, multipartInfo.uploadId);
-            await multipartUpload.abort();
-
-        } else if (uploadChannel === 's3') {
+        if (uploadChannel === 's3') {
             // 清理S3 multipart upload
             const s3Settings = uploadConfig.s3;
             const s3Channels = s3Settings.channels;
-            
+
             // 优先使用指定的渠道名称
             let s3Channel;
             const specifiedChannelName = context.specifiedChannelName;
@@ -1151,7 +866,7 @@ export async function forceCleanupUpload(context, uploadId, totalChunks) {
         // 读取 session 信息
         const sessionKey = `upload_session_${uploadId}`;
         const sessionRecord = await db.get(sessionKey);
-        const uploadChannel = sessionRecord ? JSON.parse(sessionRecord).uploadChannel : 'cfr2'; // 默认使用 cfr2
+        const uploadChannel = sessionRecord ? JSON.parse(sessionRecord).uploadChannel : 's3';
 
         // 清理 multipart upload信息
         await cleanupFailedMultipartUploads(context, uploadId, uploadChannel);
@@ -1184,139 +899,4 @@ export async function forceCleanupUpload(context, uploadId, totalChunks) {
     } catch (cleanupError) {
         console.warn('Failed to force cleanup upload:', cleanupError);
     }
-}
-
-/* ======= 单个大文件大文件分块上传到Telegram ======= */
-export async function uploadLargeFileToTelegram(context, file, fullId, metadata, fileName, fileType, returnLink, tgBotToken, tgChatId, tgChannel) {
-    const { env, waitUntil } = context;
-    const db = getDatabase(env);
-
-    const CHUNK_SIZE = 16 * 1024 * 1024; // 16MB (TG Bot getFile download limit: 20MB, leave 4MB safety margin)
-    const fileSize = file.size;
-    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
-
-    // 为了避免CPU超时，限制最大分片数（考虑Cloudflare Worker的CPU时间限制）
-    if (totalChunks > 50) {
-        return createResponse('Error: File too large (exceeds 1GB limit)', { status: 413 });
-    }
-
-    const chunks = [];
-    const uploadedChunks = [];
-
-    try {
-        // 分片上传，每10个分片做一次微小延迟以避免CPU超时
-        for (let i = 0; i < totalChunks; i++) {
-            const start = i * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, fileSize);
-            const chunkBlob = file.slice(start, end);
-
-            // 生成分片文件名
-            const chunkFileName = `${fileName}.part${i.toString().padStart(3, '0')}`;
-
-            // 上传分片（带重试机制）
-            const tgProxyUrl = tgChannel.proxyUrl || '';
-            const chunkInfo = await uploadChunkToTelegramWithRetry(
-                tgBotToken,
-                tgChatId,
-                tgProxyUrl,
-                chunkBlob,
-                chunkFileName,
-                i,
-                totalChunks
-            );
-
-            if (!chunkInfo) {
-                throw new Error(`Failed to upload chunk ${i + 1}/${totalChunks} after retries`);
-            }
-
-            // 验证分片信息完整性
-            if (!chunkInfo.file_id || !chunkInfo.file_size) {
-                throw new Error(`Invalid chunk info for chunk ${i + 1}/${totalChunks}`);
-            }
-
-            chunks.push({
-                index: i,
-                fileId: chunkInfo.file_id,
-                size: chunkInfo.file_size,
-                fileName: chunkFileName
-            });
-
-            uploadedChunks.push(chunkInfo.file_id);
-
-            // 每10个分片检查一下，添加微小延迟避免CPU限制
-            if (i > 0 && i % 10 === 0) {
-                await new Promise(resolve => setTimeout(resolve, 50)); // 50ms延迟
-            }
-        }
-
-        // 所有分片上传成功，更新metadata
-        metadata.Channel = "TelegramNew";
-        metadata.ChannelName = tgChannel.name;
-        metadata.IsChunked = true;
-        metadata.TotalChunks = totalChunks;
-        metadata.FileSize = (fileSize / 1024 / 1024).toFixed(2);
-
-
-        // 将分片信息存储到value中
-        const chunksData = JSON.stringify(chunks);
-
-        // 验证分片完整性
-        if (chunks.length !== totalChunks) {
-            throw new Error(`Chunk count mismatch: expected ${totalChunks}, got ${chunks.length}`);
-        }
-
-        // 写入最终的数据库记录，分片信息作为value
-        await db.put(fullId, chunksData, { metadata });
-
-        // 异步结束上传
-        waitUntil(endUpload(context, fullId, metadata));
-
-        return createResponse(
-            JSON.stringify([{ 'src': returnLink }]),
-            {
-                status: 200,
-                headers: {
-                    'Content-Type': 'application/json',
-                }
-            }
-        );
-
-    } catch (error) {
-        return createResponse(`Telegram Channel Error: Large file upload failed - ${error.message}`, { status: 500 });
-    }
-}
-
-// 将每个分块上传至Telegram，支持失败重试（支持代理域名）
-async function uploadChunkToTelegramWithRetry(tgBotToken, tgChatId, tgProxyUrl, chunkBlob, chunkFileName, chunkIndex, totalChunks, maxRetries = 2) {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-            const tgAPI = new TelegramAPI(tgBotToken, tgProxyUrl);
-
-            const caption = `Part ${chunkIndex + 1}/${totalChunks}`;
-
-            const response = await tgAPI.sendFile(chunkBlob, tgChatId, 'sendDocument', 'document', caption, chunkFileName);
-            if (!response.ok) {
-                throw new Error(response.description || 'Telegram API error');
-            }
-
-            const fileInfo = tgAPI.getFileInfo(response);
-            if (!fileInfo) {
-                throw new Error('Failed to extract file info from response');
-            }
-
-            return fileInfo;
-
-        } catch (error) {
-            console.warn(`Chunk ${chunkIndex} upload attempt ${attempt + 1} failed:`, error.message);
-
-            if (attempt === maxRetries - 1) {
-                return null; // 最后一次尝试也失败了
-            }
-
-            // 减少重试等待时间以节省CPU时间
-            await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-        }
-    }
-
-    return null;
 }

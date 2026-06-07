@@ -1,12 +1,6 @@
 import { getUploadConfig } from '../../api/manage/sysConfig/upload.js';
 
 const CHANNEL_IDENTITY_RULES = {
-  telegram: [
-    [
-      ['botToken', 'TgBotToken'],
-      ['chatId', 'TgChatId'],
-    ],
-  ],
   s3: [
     [
       ['accessKeyId', 'S3AccessKeyId'],
@@ -23,44 +17,16 @@ const CHANNEL_IDENTITY_RULES = {
       ['bucketName', 'S3BucketName'],
     ],
   ],
-  discord: [
-    [
-      ['botToken', 'DiscordBotToken'],
-      ['channelId', 'DiscordChannelId'],
-    ],
-  ],
-  huggingface: [
-    [
-      ['repo', 'HfRepo'],
-      ['isPrivate', 'HfIsPrivate'],
-    ],
-    [
-      ['repo', 'HfRepo'],
-    ],
-  ],
-  webdav: [
-    [
-      ['baseUrl', 'WebDAVBaseUrl'],
-      ['username', 'WebDAVUsername'],
-    ],
-    [
-      ['baseUrl', 'WebDAVBaseUrl'],
-    ],
-  ],
 };
 
 const URL_IDENTITY_FIELDS = new Set([
   'endpoint',
   'S3Endpoint',
-  'baseUrl',
-  'WebDAVBaseUrl',
 ]);
 
 const BOOLEAN_IDENTITY_FIELDS = new Set([
   'pathStyle',
   'S3PathStyle',
-  'isPrivate',
-  'HfIsPrivate',
 ]);
 
 export async function loadChannelConfig(db, env, logContext = 'channel config') {
@@ -81,18 +47,7 @@ export function findConfiguredChannel(uploadConfig, groupName, metadata = {}) {
     if (namedChannel) return namedChannel;
   }
 
-  const identityChannel = findChannelByPersistedIdentity(channels, groupName, metadata);
-  if (identityChannel) return identityChannel;
-
-  return findLegacyTelegramEnvChannel(channels, groupName, metadata);
-}
-
-function findLegacyTelegramEnvChannel(channels, groupName, metadata = {}) {
-  if (groupName === 'telegram' && (metadata.Channel === 'Telegram' || metadata.Channel === 'TelegramNew')) {
-    return channels.find((channel) => channel.name === 'Telegram_env') || null;
-  }
-
-  return null;
+  return findChannelByPersistedIdentity(channels, groupName, metadata);
 }
 
 function findChannelByPersistedIdentity(channels, groupName, metadata = {}) {

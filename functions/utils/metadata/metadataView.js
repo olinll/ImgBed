@@ -1,6 +1,5 @@
 import { findConfiguredChannel, loadChannelConfig } from './channelConfig.js';
 import { stripConfigDerivedMetadata, stripSensitiveMetadata } from './metadataSecurity.js';
-import { buildWebDAVUrl } from '../storage/webdavAPI.js';
 
 export async function createMetadataViewContext(db, env) {
   return {
@@ -15,8 +14,6 @@ export async function buildFileMetadataForManagement(db, env, metadata = {}, vie
   const view = stripConfigDerivedMetadata(stripSensitiveMetadata(metadata));
 
   enrichS3Metadata(context, metadata, view);
-  enrichHuggingFaceMetadata(context, metadata, view);
-  enrichWebDAVMetadata(context, metadata, view);
 
   return view;
 }
@@ -55,36 +52,6 @@ function enrichS3Metadata(context, sourceMetadata, view) {
     }
   } catch (error) {
     console.warn('Failed to enrich S3 metadata:', error.message);
-  }
-}
-
-function enrichHuggingFaceMetadata(context, sourceMetadata, view) {
-  if (sourceMetadata?.Channel !== 'HuggingFace') return;
-
-  try {
-    const channel = findConfiguredChannel(context.uploadConfig, 'huggingface', sourceMetadata);
-    if (!channel) return;
-
-    if (channel.repo && sourceMetadata.HfFilePath) {
-      view.HfFileUrl = `https://huggingface.co/datasets/${channel.repo}/resolve/main/${sourceMetadata.HfFilePath}`;
-    }
-  } catch (error) {
-    console.warn('Failed to enrich HuggingFace metadata:', error.message);
-  }
-}
-
-function enrichWebDAVMetadata(context, sourceMetadata, view) {
-  if (sourceMetadata?.Channel !== 'WebDAV') return;
-
-  try {
-    const channel = findConfiguredChannel(context.uploadConfig, 'webdav', sourceMetadata);
-    if (!channel) return;
-
-    if (channel.publicUrl && sourceMetadata.WebDAVFilePath) {
-      view.WebDAVPublicUrl = buildWebDAVUrl(channel.publicUrl, sourceMetadata.WebDAVFilePath);
-    }
-  } catch (error) {
-    console.warn('Failed to enrich WebDAV metadata:', error.message);
   }
 }
 

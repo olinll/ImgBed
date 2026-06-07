@@ -1,12 +1,6 @@
 const SENSITIVE_METADATA_KEYS = [
   'S3AccessKeyId',
   'S3SecretAccessKey',
-  'TgBotToken',
-  'DiscordBotToken',
-  'HfToken',
-  'WebDAVUsername',
-  'WebDAVPassword',
-  'WebDAVHeaders',
 ];
 
 const CONFIG_DERIVED_METADATA_KEYS = [
@@ -16,16 +10,6 @@ const CONFIG_DERIVED_METADATA_KEYS = [
   'S3Region',
   'S3BucketName',
   'S3CdnFileUrl',
-  'TgChatId',
-  'TgProxyUrl',
-  'DiscordChannelId',
-  'DiscordProxyUrl',
-  'HfRepo',
-  'HfIsPrivate',
-  'HfFileUrl',
-  'WebDAVBaseUrl',
-  'WebDAVPublicBaseUrl',
-  'WebDAVPublicUrl',
 ];
 
 export function stripSensitiveMetadata(metadata = {}) {
@@ -44,15 +28,6 @@ export function stripSensitiveMetadataInPlace(metadata = {}) {
 
   for (const key of SENSITIVE_METADATA_KEYS) {
     delete metadata[key];
-  }
-
-  if (metadata.WebDAVBaseUrl) {
-    const safeBaseUrl = stripUrlUserinfo(metadata.WebDAVBaseUrl);
-    if (safeBaseUrl) {
-      metadata.WebDAVBaseUrl = safeBaseUrl;
-    } else {
-      delete metadata.WebDAVBaseUrl;
-    }
   }
 
   return metadata;
@@ -92,15 +67,4 @@ export function cleanPersistedMetadataInPlace(metadata = {}) {
   stripSensitiveMetadataInPlace(metadata);
   stripConfigDerivedMetadataInPlace(metadata);
   return metadata;
-}
-
-function stripUrlUserinfo(value) {
-  try {
-    const url = new URL(value);
-    url.username = '';
-    url.password = '';
-    return url.toString();
-  } catch {
-    return '';
-  }
 }

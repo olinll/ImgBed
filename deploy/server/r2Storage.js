@@ -1,6 +1,5 @@
 /**
- * 本地 R2 存储适配器
- * 使用本地文件系统模拟 Cloudflare R2 的 API 接口
+ * Local file storage adapter — filesystem-backed R2-compatible API.
  */
 
 import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, readdirSync, statSync, rmSync } from 'fs';

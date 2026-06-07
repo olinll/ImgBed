@@ -1,7 +1,6 @@
 /**
- * SQLite D1 适配器
- * 使用 better-sqlite3 模拟 Cloudflare D1 的 API 接口
- * 使得现有的 d1Database.js 无需修改即可在 Node.js 中运行
+ * SQLite database adapter
+ * Wraps better-sqlite3 with a D1-compatible prepare().bind().all()/first()/run() API.
  */
 
 import Database from 'better-sqlite3';

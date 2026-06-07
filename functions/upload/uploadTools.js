@@ -1,5 +1,4 @@
 import { fetchSecurityConfig } from "../utils/sysConfig";
-import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../utils/purgeCache";
 import { addFileToIndex } from "../utils/indexManager.js";
 import { getDatabase } from '../utils/databaseAdapter.js';
 
@@ -320,40 +319,15 @@ export async function moderateContent(env, url) {
     return label;
 }
 
-// 清除CDN缓存
-export async function purgeCDNCache(env, cdnUrl, url, normalizedFolder) {
-    if (env.dev_mode === 'true') {
-        return;
-    }
-
-    // 清除CDN缓存
-    try {
-        await purgeCFCache(env, cdnUrl);
-    } catch (error) {
-        console.error('Failed to clear CDN cache:', error);
-    }
-
-    // 清除 api/randomFileList 等API缓存
-    await purgeRandomFileListCache(url.origin, normalizedFolder);
-    await purgePublicFileListCache(url.origin, normalizedFolder);
-}
-
-// 结束上传：清除缓存，维护索引
+// 结束上传：维护索引
 export async function endUpload(context, fileId, metadata) {
-    const { env, url } = context;
-
-    // 清除CDN缓存
-    const cdnUrl = `https://${url.hostname}/file/${fileId}`;
-    const normalizedFolder = sanitizeUploadFolder(url.searchParams.get('uploadFolder') || '');
-    await purgeCDNCache(env, cdnUrl, url, normalizedFolder);
-
     // 更新文件索引（索引更新时会自动计算容量统计）
     await addFileToIndex(context, fileId, metadata);
 }
 
 // 从 request 中解析 ip 地址
 export function getUploadIp(request) {
-    const ip = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || request.headers.get("x-forwarded-for") || request.headers.get("x-client-ip") || request.headers.get("x-host") || request.headers.get("x-originating-ip") || request.headers.get("x-cluster-client-ip") || request.headers.get("forwarded-for") || request.headers.get("forwarded") || request.headers.get("via") || request.headers.get("requester") || request.headers.get("true-client-ip") || request.headers.get("client-ip") || request.headers.get("x-remote-ip") || request.headers.get("x-originating-ip") || request.headers.get("fastly-client-ip") || request.headers.get("akamai-origin-hop") || request.headers.get("x-remote-addr") || request.headers.get("x-remote-host") || request.headers.get("x-client-ips")
+    const ip = request.headers.get("x-real-ip") || request.headers.get("x-forwarded-for") || request.headers.get("x-client-ip") || request.headers.get("x-host") || request.headers.get("x-originating-ip") || request.headers.get("x-cluster-client-ip") || request.headers.get("forwarded-for") || request.headers.get("forwarded") || request.headers.get("via") || request.headers.get("requester") || request.headers.get("true-client-ip") || request.headers.get("client-ip") || request.headers.get("x-remote-ip") || request.headers.get("x-originating-ip") || request.headers.get("fastly-client-ip") || request.headers.get("akamai-origin-hop") || request.headers.get("x-remote-addr") || request.headers.get("x-remote-host") || request.headers.get("x-client-ips")
 
     if (!ip) {
         return null;

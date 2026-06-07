@@ -89,15 +89,6 @@ export async function getOthersConfig(db, env) {
         fixed: false,
     }
 
-    // CloudFlare API Token
-    const kvCloudflareApiToken = settingsKV.cloudflareApiToken || {}
-    settings.cloudflareApiToken = {
-        CF_ZONE_ID: kvCloudflareApiToken.CF_ZONE_ID || env.CF_ZONE_ID,
-        CF_EMAIL: kvCloudflareApiToken.CF_EMAIL || env.CF_EMAIL,
-        CF_API_KEY: kvCloudflareApiToken.CF_API_KEY || env.CF_API_KEY,
-        fixed: false,
-    }
-
     // WebDAV
     const kvWebDAV = settingsKV.webDAV || {}
     settings.webDAV = {

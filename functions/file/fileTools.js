@@ -120,10 +120,6 @@ export async function getFileContent(request, targetUrl, max_retries = 2) {
     return null;
 }
 
-export function isTgChannel(imgRecord) {
-    return imgRecord.metadata?.Channel === 'Telegram' || imgRecord.metadata?.Channel === 'TelegramNew';
-}
-
 // 图片可访问性检查
 export async function returnWithCheck(context, imgRecord) {
     const { url, securityConfig } = context;

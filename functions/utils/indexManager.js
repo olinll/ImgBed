@@ -43,8 +43,7 @@ const INDEX_KEY = 'manage@index';
 const INDEX_META_KEY = 'manage@index@meta'; // 索引元数据键
 const OPERATION_KEY_PREFIX = 'manage@index@operation_';
 // D1 单字段限制 2MB，KV 限制 25MB，根据数据库类型动态设置
-const INDEX_CHUNK_SIZE_D1 = 500; // D1 数据库分块大小
-const INDEX_CHUNK_SIZE_KV = 5000; // KV 存储分块大小
+const INDEX_CHUNK_SIZE = 500; // SQLite chunk size
 const KV_LIST_LIMIT = 1000; // 数据库列出批量大小
 const BATCH_SIZE = 10; // 批量处理大小
 
@@ -55,7 +54,7 @@ const BATCH_SIZE = 10; // 批量处理大小
  */
 export function getIndexChunkSize(env) {
     const config = checkDatabaseConfig(env);
-    return config.usingD1 ? INDEX_CHUNK_SIZE_D1 : INDEX_CHUNK_SIZE_KV;
+    return INDEX_CHUNK_SIZE;
 }
 
 /**
@@ -933,10 +932,7 @@ function incrementStat(stats, key) {
 }
 
 function normalizeChannel(channel) {
-    if (channel === 'TelegramNew') {
-        return 'Telegram';
-    }
-    return normalizeTrendKey(channel, 'Telegraph');
+    return normalizeTrendKey(channel, 'Unknown');
 }
 
 function normalizeTrendKey(value, fallback = 'Unknown') {

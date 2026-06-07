@@ -1,5 +1,5 @@
 /**
- * D1 数据库操作工具类
+ * SQLite database operations (backed by better-sqlite3).
  */
 
 class D1Database {
@@ -11,7 +11,7 @@ class D1Database {
 // ==================== 文件操作 ====================
 
 /**
- * 保存文件记录 (替代 KV.put)
+ * Save a file record.
  */
 D1Database.prototype.putFile = function(fileId, value, options) {
     value = value || '';
@@ -25,9 +25,8 @@ D1Database.prototype.putFile = function(fileId, value, options) {
         'INSERT OR REPLACE INTO files (' +
         'id, value, metadata, file_name, file_type, file_size, ' +
         'upload_ip, upload_address, list_type, timestamp, ' +
-        'label, directory, channel, channel_name, ' +
-        'tg_file_id, tg_chat_id, tg_bot_token, is_chunked' +
-        ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'label, directory, channel, channel_name, is_chunked' +
+        ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
     
     return stmt.bind(
@@ -45,15 +44,12 @@ D1Database.prototype.putFile = function(fileId, value, options) {
         extractedFields.directory,
         extractedFields.channel,
         extractedFields.channelName,
-        extractedFields.tgFileId,
-        extractedFields.tgChatId,
-        extractedFields.tgBotToken,
         extractedFields.isChunked
     ).run();
 };
 
 /**
- * 获取文件记录 (替代 KV.get)
+ * Get a file record.
  */
 D1Database.prototype.getFile = function(fileId) {
     var self = this;
@@ -69,14 +65,14 @@ D1Database.prototype.getFile = function(fileId) {
 };
 
 /**
- * 获取文件记录包含元数据 (替代 KV.getWithMetadata)
+ * Get a file record with metadata.
  */
 D1Database.prototype.getFileWithMetadata = function(fileId) {
     return this.getFile(fileId);
 };
 
 /**
- * 删除文件记录 (替代 KV.delete)
+ * Delete a file record.
  */
 D1Database.prototype.deleteFile = function(fileId) {
     var stmt = this.db.prepare('DELETE FROM files WHERE id = ?');
@@ -84,7 +80,7 @@ D1Database.prototype.deleteFile = function(fileId) {
 };
 
 /**
- * 列出文件 (替代 KV.list)
+ * List files.
  */
 D1Database.prototype.listFiles = function(options) {
     options = options || {};
@@ -138,7 +134,7 @@ D1Database.prototype.listFiles = function(options) {
 // ==================== 设置操作 ====================
 
 /**
- * 保存设置 (替代 KV.put)
+ * Save a setting.
  */
 D1Database.prototype.putSetting = function(key, value, category) {
     if (!category && key.startsWith('manage@sysConfig@')) {
@@ -153,7 +149,7 @@ D1Database.prototype.putSetting = function(key, value, category) {
 };
 
 /**
- * 获取设置 (替代 KV.get)
+ * Get a setting.
  */
 D1Database.prototype.getSetting = function(key) {
     var stmt = this.db.prepare('SELECT value FROM settings WHERE key = ?');
@@ -163,7 +159,7 @@ D1Database.prototype.getSetting = function(key) {
 };
 
 /**
- * 删除设置 (替代 KV.delete)
+ * Delete a setting.
  */
 D1Database.prototype.deleteSetting = function(key) {
     var stmt = this.db.prepare('DELETE FROM settings WHERE key = ?');
@@ -171,7 +167,7 @@ D1Database.prototype.deleteSetting = function(key) {
 };
 
 /**
- * 列出设置 (替代 KV.list)
+ * List settings.
  */
 D1Database.prototype.listSettings = function(options) {
     options = options || {};
@@ -303,9 +299,6 @@ D1Database.prototype.extractMetadataFields = function(metadata) {
         directory: metadata.Directory || null,
         channel: metadata.Channel || null,
         channelName: metadata.ChannelName || null,
-        tgFileId: metadata.TgFileId || null,
-        tgChatId: null,
-        tgBotToken: null,
         isChunked: metadata.IsChunked || false
     };
 };

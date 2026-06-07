@@ -1,13 +1,13 @@
 /**
- * Docker 模式下的原生 Node.js 服务器
- * 使用 Hono 作为 Web 框架，代理 Cloudflare Pages Functions 请求
- * 使用 SQLite 替代 D1，本地文件系统替代 R2
+ * ImgBed Node.js server — Hono web framework with Vite dev middleware.
+ * Storage: SQLite (database) + local filesystem or S3-compatible (files).
  */
 
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { getConnInfo } from '@hono/node-server/conninfo';
+import { createServer } from 'http';
 import { existsSync, readFileSync, readdirSync, statSync, mkdirSync } from 'fs';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -16,15 +16,51 @@ import { LocalR2Storage } from './r2Storage.js';
 
 const NativeResponse = globalThis.Response;
 
-// ==================== 模拟 Cloudflare 全局 API ====================
+// ==================== Global API polyfills ====================
 
-// 模拟 Cloudflare Cache API（Node.js 中不存在）
+// In-memory cache for caches.default (replaces Cloudflare Cache API)
 if (typeof globalThis.caches === 'undefined') {
+    const cacheStore = new Map();
+    // Periodic cleanup every 5 minutes
+    setInterval(() => {
+        const now = Date.now();
+        for (const [key, entry] of cacheStore) {
+            if (entry.ttl && now > entry.ttl) {
+                cacheStore.delete(key);
+            }
+        }
+    }, 5 * 60 * 1000).unref();
     globalThis.caches = {
         default: {
-            async match() { return undefined; },
-            async put() {},
-            async delete() { return false; },
+            async match(request) {
+                const key = typeof request === 'string' ? request : (request instanceof Request ? request.url : String(request));
+                const entry = cacheStore.get(key);
+                if (!entry) return undefined;
+                if (entry.ttl && Date.now() > entry.ttl) {
+                    cacheStore.delete(key);
+                    return undefined;
+                }
+                return new Response(entry.body, entry.init);
+            },
+            async put(request, response) {
+                const key = typeof request === 'string' ? request : (request instanceof Request ? request.url : String(request));
+                const ttlHeader = response.headers.get('Cache-Control');
+                let ttl = null;
+                if (ttlHeader) {
+                    const match = ttlHeader.match(/max-age=(\d+)/);
+                    if (match) ttl = Date.now() + parseInt(match[1]) * 1000;
+                }
+                const body = await response.clone().arrayBuffer();
+                cacheStore.set(key, {
+                    body,
+                    init: { status: response.status, headers: Object.fromEntries(response.headers.entries()) },
+                    ttl,
+                });
+            },
+            async delete(request) {
+                const key = typeof request === 'string' ? request : (request instanceof Request ? request.url : String(request));
+                return cacheStore.delete(key);
+            },
         },
     };
 }
@@ -82,45 +118,157 @@ mkdirSync(DATA_DIR, { recursive: true });
 
 const sqliteD1 = new SqliteD1(join(DATA_DIR, 'database.sqlite'));
 
-// 执行初始化 SQL
-const initSqlPath = join(ROOT_DIR, 'database', 'init.sql');
-if (existsSync(initSqlPath)) {
-    const initSql = readFileSync(initSqlPath, 'utf8');
-    try {
-        sqliteD1.exec(initSql);
-        console.log('Database initialized successfully');
-    } catch (e) {
+// Inline database schema — creates tables, indexes, triggers, and applies migrations
+const INIT_SQL = `
+CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    value TEXT,
+    metadata TEXT NOT NULL,
+    file_name TEXT,
+    file_type TEXT,
+    file_size TEXT,
+    upload_ip TEXT,
+    upload_address TEXT,
+    list_type TEXT,
+    timestamp INTEGER,
+    label TEXT,
+    directory TEXT,
+    channel TEXT,
+    channel_name TEXT,
+    is_chunked BOOLEAN DEFAULT FALSE,
+    tags TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    category TEXT,
+    description TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS index_operations (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    processed BOOLEAN DEFAULT FALSE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS index_metadata (
+    key TEXT PRIMARY KEY,
+    last_updated INTEGER,
+    total_count INTEGER DEFAULT 0,
+    last_operation_id TEXT,
+    chunk_count INTEGER DEFAULT 0,
+    chunk_size INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS other_data (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    type TEXT,
+    description TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_timestamp ON files(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_files_directory ON files(directory);
+CREATE INDEX IF NOT EXISTS idx_files_channel ON files(channel);
+CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type);
+CREATE INDEX IF NOT EXISTS idx_files_upload_ip ON files(upload_ip);
+CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_files_tags ON files(tags);
+
+CREATE INDEX IF NOT EXISTS idx_settings_category ON settings(category);
+
+CREATE INDEX IF NOT EXISTS idx_index_operations_timestamp ON index_operations(timestamp);
+CREATE INDEX IF NOT EXISTS idx_index_operations_processed ON index_operations(processed);
+CREATE INDEX IF NOT EXISTS idx_index_operations_type ON index_operations(type);
+
+CREATE INDEX IF NOT EXISTS idx_other_data_type ON other_data(type);
+
+CREATE TRIGGER IF NOT EXISTS update_files_updated_at
+    AFTER UPDATE ON files
+    BEGIN
+        UPDATE files SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+    END;
+
+CREATE TRIGGER IF NOT EXISTS update_settings_updated_at
+    AFTER UPDATE ON settings
+    BEGIN
+        UPDATE settings SET updated_at = CURRENT_TIMESTAMP WHERE key = NEW.key;
+    END;
+
+CREATE TRIGGER IF NOT EXISTS update_index_metadata_updated_at
+    AFTER UPDATE ON index_metadata
+    BEGIN
+        UPDATE index_metadata SET updated_at = CURRENT_TIMESTAMP WHERE key = NEW.key;
+    END;
+
+CREATE TRIGGER IF NOT EXISTS update_other_data_updated_at
+    AFTER UPDATE ON other_data
+    BEGIN
+        UPDATE other_data SET updated_at = CURRENT_TIMESTAMP WHERE key = NEW.key;
+    END;
+
+`;
+
+try {
+    sqliteD1.exec(INIT_SQL);
+    console.log('Database initialized successfully');
+} catch (e) {
+    // "duplicate column name" is expected on re-runs after migration was applied
+    if (!e.message.includes('duplicate column name')) {
         console.log('Database init:', e.message);
     }
 }
 
-// 执行数据库迁移
-const migrationsDir = join(ROOT_DIR, 'database', 'migrations');
-if (existsSync(migrationsDir)) {
-    const migrations = readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
-    for (const migration of migrations) {
-        try {
-            const sql = readFileSync(join(migrationsDir, migration), 'utf8');
-            sqliteD1.exec(sql);
-            console.log(`Migration ${migration}: OK`);
-        } catch (e) {
-            // 忽略已执行的迁移（如列已存在等）
-            console.log(`Migration ${migration}: ${e.message}`);
-        }
-    }
+// Migration: add tags column for databases created before v2.2.1
+try {
+    sqliteD1.exec('ALTER TABLE files ADD COLUMN tags TEXT;');
+} catch (e) {
+    // Column already exists — ok
 }
 
-// ==================== 初始化 R2 存储 ====================
+// ==================== 初始化存储 ====================
 
-const r2Storage = new LocalR2Storage(join(DATA_DIR, 'r2'));
+// 本地文件系统存储
+const localStoragePath = process.env.LOCAL_STORAGE_PATH
+    ? resolve(process.env.LOCAL_STORAGE_PATH)
+    : join(DATA_DIR, 'local');
+const localStorage = new LocalR2Storage(localStoragePath);
+console.log('Local storage initialized at:', localStoragePath);
 
 // ==================== 创建环境对象 ====================
 
+// Only expose env vars needed by functions
+const ALLOWED_ENV_KEYS = [
+    'NODE_ENV', 'PORT', 'LOCAL_STORAGE_PATH',
+    'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY', 'S3_BUCKET_NAME',
+    'S3_ENDPOINT', 'S3_REGION', 'S3_PATH_STYLE', 'S3_CDN_DOMAIN',
+    'ADMIN_USER', 'ADMIN_PASS', 'RESET_KEY', 'AUTH_SECRET',
+];
+
 function createEnv() {
+    const filteredEnv = {};
+    for (const key of ALLOWED_ENV_KEYS) {
+        if (process.env[key] !== undefined) {
+            filteredEnv[key] = process.env[key];
+        }
+    }
     return {
-        ...process.env,
+        ...filteredEnv,
+        LOCAL_STORAGE_PATH: localStoragePath,
         img_d1: sqliteD1,
-        img_r2: r2Storage,
+        img_local: localStorage,
     };
 }
 
@@ -279,7 +427,7 @@ async function handleFunctionRequest(originalRequest, pathname) {
         middlewares.push(...mod.onRequest.slice(0, -1));
     }
 
-    // 模拟 Cloudflare 的 request.cf 属性（telemetryData 等中间件依赖该属性）
+    // Add request.cf polyfill (used by telemetry middleware)
     if (!request.cf) {
         request.cf = {
             country: 'XX',
@@ -301,7 +449,7 @@ async function handleFunctionRequest(originalRequest, pathname) {
         };
     }
 
-    // 创建 Cloudflare Pages Functions 风格的 context 对象
+    // Create function context object
     const env = createEnv();
     const context = {
         request,
@@ -331,21 +479,17 @@ function isFunctionPath(pathname) {
     return FUNCTION_PREFIXES.some(prefix => pathname.startsWith(prefix));
 }
 
-// Functions 路由处理 - 处理所有 HTTP 方法
+// Functions 路由处理
 app.all('*', async (c, next) => {
     const url = new URL(c.req.url);
     const pathname = url.pathname;
 
-    // 检查是否是 function 路径
     if (isFunctionPath(pathname)) {
         try {
-            // 获取客户端真实 IP 并注入到请求 header 中
-            // 因为 Node.js 环境没有 cf-connecting-ip 等 CDN header
             let request = c.req.raw;
             try {
                 const info = getConnInfo(c);
                 let clientIp = info.remote?.address;
-                // 去掉 IPv6-mapped IPv4 前缀，如 ::ffff:127.0.0.1 → 127.0.0.1
                 if (clientIp && clientIp.startsWith('::ffff:')) {
                     clientIp = clientIp.slice(7);
                 }
@@ -372,45 +516,134 @@ app.all('*', async (c, next) => {
         }
     }
 
-    // 不是 function 路径，继续到静态文件
     await next();
 });
 
-// 静态文件服务
-app.use('/*', serveStatic({
-    root: './frontend-dist',
-    rewriteRequestPath: (path) => path,
-}));
+// ==================== Node.js → Hono 适配 ====================
 
-// 默认返回 index.html（SPA 支持）
-app.get('*', async (c) => {
-    const indexPath = join(ROOT_DIR, 'frontend-dist', 'index.html');
-    if (existsSync(indexPath)) {
-        const content = readFileSync(indexPath, 'utf8');
-        return c.html(content);
+function nodeReqToHonoRequest(req) {
+    const headers = new Headers();
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        headers.set(req.rawHeaders[i], req.rawHeaders[i + 1]);
     }
-    return c.text('Not Found', 404);
-});
-
-// ==================== 启动服务器 ====================
-
-async function fetchWithNativeResponse(request, env, executionCtx) {
-    const response = await app.fetch(request, env, executionCtx);
-    if (!response) {
-        return response;
-    }
-    return new NativeResponse(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
+    const url = `http://${req.headers.host || 'localhost'}${req.url}`;
+    return new Request(url, {
+        method: req.method,
+        headers,
+        body: ['GET', 'HEAD'].includes(req.method) ? undefined : req,
+        duplex: 'half',
     });
 }
 
-serve({
-    fetch: fetchWithNativeResponse,
-    port,
-}, (info) => {
-    console.log(`Server running at http://0.0.0.0:${info.port}`);
-    console.log(`Data directory: ${DATA_DIR}`);
-    console.log(`Mode: Docker (Native Node.js)`);
-});
+async function pipeHonoResponse(honoRes, nodeRes) {
+    nodeRes.statusCode = honoRes.status;
+    for (const [key, value] of honoRes.headers) {
+        if (key.toLowerCase() !== 'content-encoding') {
+            nodeRes.setHeader(key, value);
+        }
+    }
+    if (honoRes.body) {
+        const reader = honoRes.body.getReader();
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) { nodeRes.end(); break; }
+            nodeRes.write(value);
+        }
+    } else {
+        nodeRes.end();
+    }
+}
+
+// ==================== 启动服务器 ====================
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+if (isProduction) {
+    // 生产模式：静态文件服务
+    app.use('/*', serveStatic({
+        root: './frontend-dist',
+        rewriteRequestPath: (path) => path,
+    }));
+    app.get('*', async (c) => {
+        const indexPath = join(ROOT_DIR, 'frontend-dist', 'index.html');
+        if (existsSync(indexPath)) {
+            return c.html(readFileSync(indexPath, 'utf8'));
+        }
+        return c.text('Not Found', 404);
+    });
+
+    async function fetchWithNativeResponse(request, env, executionCtx) {
+        const response = await app.fetch(request, env, executionCtx);
+        if (!response) return response;
+        return new NativeResponse(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+        });
+    }
+
+    serve({
+        fetch: fetchWithNativeResponse,
+        port,
+    }, (info) => {
+        console.log(`Server running at http://0.0.0.0:${info.port}`);
+        console.log(`Data directory: ${DATA_DIR}`);
+        console.log(`Mode: Production`);
+    });
+} else {
+    // 开发模式：同一个 HTTP 服务器，Vite 中间件处理前端，Hono 处理 API
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+        configFile: join(ROOT_DIR, 'vite.config.js'),
+    });
+
+    const server = createServer(async (req, res) => {
+        const pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+
+        if (isFunctionPath(pathname)) {
+            // API 请求交给 Hono
+            try {
+                const request = nodeReqToHonoRequest(req);
+                request.cf = {
+                    country: 'XX', city: 'Unknown', continent: 'XX',
+                    latitude: '0', longitude: '0', region: '', regionCode: '',
+                    timezone: '', postalCode: '', asn: 0, asOrganization: '',
+                    colo: 'LOCAL', httpProtocol: 'HTTP/1.1', requestPriority: '',
+                    tlsCipher: '', tlsVersion: '',
+                };
+                const clientIp = req.socket.remoteAddress?.replace(/^::ffff:/, '');
+                if (clientIp && !request.headers.get('x-real-ip')) {
+                    const newHeaders = new Headers(request.headers);
+                    newHeaders.set('x-real-ip', clientIp);
+                    // Re-create request with updated headers
+                    const updatedRequest = new Request(request.url, {
+                        method: request.method,
+                        headers: newHeaders,
+                        body: request.body,
+                        duplex: 'half',
+                    });
+                    updatedRequest.cf = request.cf;
+                    const honoRes = await app.fetch(updatedRequest);
+                    await pipeHonoResponse(honoRes, res);
+                } else {
+                    const honoRes = await app.fetch(request);
+                    await pipeHonoResponse(honoRes, res);
+                }
+            } catch (err) {
+                console.error('API error:', err);
+                res.statusCode = 500;
+                res.end('Internal Server Error');
+            }
+        } else {
+            // 前端资源交给 Vite（HTML、JS、CSS、HMR WebSocket）
+            vite.middlewares(req, res);
+        }
+    });
+
+    server.listen(port, () => {
+        console.log(`[dev] Server running at http://0.0.0.0:${port} (Vite HMR enabled)`);
+        console.log(`Data directory: ${DATA_DIR}`);
+    });
+}
