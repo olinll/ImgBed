@@ -418,7 +418,7 @@ methods: {
 
         axios({
             url: '/upload' +
-                '&uploadChannel=' + uploadChannel +
+                '?uploadChannel=' + uploadChannel +
                 (this.channelName ? '&channelName=' + encodeURIComponent(this.channelName) : '') +
                 '&uploadNameType=' + uploadNameType + 
                 '&autoRetry=' + autoRetry + 
@@ -482,7 +482,7 @@ methods: {
 
             const initResponse = await axios({
                 url: '/upload' +
-                    '&uploadChannel=' + uploadChannel +
+                    '?uploadChannel=' + uploadChannel +
                     (this.channelName ? '&channelName=' + encodeURIComponent(this.channelName) : '') +
                     '&uploadNameType=' + uploadNameType + 
                     '&autoRetry=' + autoRetry + 
@@ -538,7 +538,7 @@ methods: {
                     try {
                         await axios({
                             url: '/upload' +
-                                '&uploadChannel=' + uploadChannel +
+                                '?uploadChannel=' + uploadChannel +
                                 (this.channelName ? '&channelName=' + encodeURIComponent(this.channelName) : '') +
                                 '&uploadNameType=' + uploadNameType + 
                                 '&autoRetry=' + autoRetry + 
@@ -623,7 +623,7 @@ methods: {
 
             const response = await axios({
                 url: '/upload' +
-                    '&uploadChannel=' + uploadChannel +
+                    '?uploadChannel=' + uploadChannel +
                     (this.channelName ? '&channelName=' + encodeURIComponent(this.channelName) : '') +
                     '&uploadNameType=' + uploadNameType + 
                     '&autoRetry=' + autoRetry + 

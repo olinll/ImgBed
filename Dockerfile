@@ -33,6 +33,8 @@ COPY --from=build --chown=appuser:appuser /app/frontend-dist ./frontend-dist
 COPY --from=build --chown=appuser:appuser /app/deploy ./deploy
 COPY --from=build --chown=appuser:appuser /app/functions ./functions
 
+RUN mkdir -p /app/data && chown appuser:appuser /app/data
+
 ENV NODE_ENV=production
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
